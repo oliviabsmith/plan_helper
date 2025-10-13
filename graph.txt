@@ -1,0 +1,29 @@
+[Jira Upload/CSV] ──> Ticket Ingestor ──> Decomposer ──> Affinity Finder ──> 2-Week Planner
+                                 │                │                │                 │
+                                 ▼                ▼                ▼                 ▼
+                              tickets         subtasks        affinity_*         plan_items
+                                                   │                │                 │
+                                                   └────────┬───────┘                 │
+                                                            ▼                         │
+                                                     Morning Reporter <─────┐         │
+                                                            │               │         │
+                                                            ▼               │         ▼
+                                                      daily_logs/items ◄── Evening Updater
+                                                                 │
+                                                                 ▼
+                                                         Memory Curator
+                                                        memory_snippets
+
+
+
+
+Table access by agent (concise matrix)
+Agent	tickets	subtasks	affinity_*	plan_items(+J)	daily_logs(+items)	memory_snippets
+Orchestrator	R	R	R	R	R	R
+Ticket Ingestor	R/W					
+Decomposer	R	W				
+Affinity Finder	R	R	W			
+2-Week Planner	R	R	R	W		
+Morning Reporter		R		R		R
+Evening Updater		R/W		R/W	R/W	
+Memory Curator						R/W
