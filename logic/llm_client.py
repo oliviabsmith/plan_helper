@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
@@ -23,6 +24,13 @@ class LLMClientError(RuntimeError):
 
 
 DEFAULT_MODEL = "gpt-4o-mini"
+
+
+SUBTASK_GENERATION_DEFAULTS: Dict[str, Any] = {
+    "max_subtasks": 5,
+    "first_subtask_estimate_hours": 1.0,
+    "default_estimate_hours": 1.5,
+}
 
 
 @lru_cache(maxsize=1)
@@ -47,14 +55,24 @@ def _build_prompt(ticket: Ticket, llm_options: Dict[str, Any]) -> List[Dict[str,
     tags: Iterable[str] = ticket.tech or []
     tone = llm_options.get("tone")
     extra_context = llm_options.get("extra_context")
-    max_items = llm_options.get("max_subtasks") or 5
+    max_items = llm_options.get("max_subtasks", SUBTASK_GENERATION_DEFAULTS["max_subtasks"])
     requested_model = llm_options.get("model")
+    default_hours = llm_options.get(
+        "default_estimate_hours", SUBTASK_GENERATION_DEFAULTS["default_estimate_hours"]
+    )
+    first_hours = llm_options.get(
+        "first_subtask_estimate_hours",
+        SUBTASK_GENERATION_DEFAULTS["first_subtask_estimate_hours"],
+    )
+    dependencies = getattr(ticket, "dependencies", None) or []
+    acceptance = getattr(ticket, "acceptance_criteria", None)
 
     system_lines = [
         "You are an experienced software delivery lead helping to break down work.",
         "Produce well-scoped, actionable bullet items for engineers.",
         "Respond with a JSON array where each element has keys 'text_sub', 'tags', and 'est_hours'.",
         "Do not include markdown or commentary outside of JSON.",
+        "Incorporate relevant dependencies, sequencing risks, and acceptance criteria into the plan.",
     ]
     if tone:
         system_lines.append(f"Write the text_sub field with a {tone} tone.")
@@ -65,9 +83,26 @@ def _build_prompt(ticket: Ticket, llm_options: Dict[str, Any]) -> List[Dict[str,
         f"Tags: {', '.join(tags) if tags else 'none'}",
         f"Create at most {max_items} subtasks.",
         "Each subtask should estimate hours as a number (may be fractional).",
+        (
+            "Use roughly {:.1f} hours for the kickoff/discovery subtask and {:.1f} hours as the"
+            " baseline for the remaining items unless the ticket details justify otherwise."
+        ).format(first_hours, default_hours),
     ]
     if extra_context:
         user_lines.append(f"Additional context: {extra_context}")
+    if dependencies:
+        dep_text = ", ".join(str(dep).strip() for dep in dependencies if str(dep).strip())
+        user_lines.append(f"Dependencies or prerequisites: {dep_text or 'none provided'}")
+    else:
+        user_lines.append("Dependencies or prerequisites: none provided")
+
+    if acceptance:
+        if isinstance(acceptance, (list, tuple)):
+            crit_lines = ["Acceptance criteria:"]
+            crit_lines.extend(f"- {str(item).strip()}" for item in acceptance if str(item).strip())
+            user_lines.append("\n".join(crit_lines))
+        else:
+            user_lines.append(f"Acceptance criteria: {str(acceptance).strip()}")
 
     messages = [
         {"role": "system", "content": "\n".join(system_lines)},
@@ -143,16 +178,79 @@ def generate_subtask_bullets(ticket: Ticket, llm_options: Optional[Dict[str, Any
         Optional overrides such as tone, extra_context, model, or max_subtasks.
     """
 
-    options = dict(llm_options or {})
+    options = {**SUBTASK_GENERATION_DEFAULTS, **(llm_options or {})}
     messages = _build_prompt(ticket, options)
+    raw_text = _invoke_with_fallback(messages, options)
+
+    try:
+        return _parse_response(raw_text, ticket.tech or [])
+    except LLMClientError:
+        if float(options.get("temperature", 0.3)) > 0:
+            logger.info("Retrying subtask generation with deterministic temperature due to parsing error")
+            deterministic_options = dict(options)
+            deterministic_options["temperature"] = 0.0
+            raw_text = _invoke_raw(messages, deterministic_options)
+            return _parse_response(raw_text, ticket.tech or [])
+        raise
+
+
+def _format_affinity_members(members: Sequence[Any]) -> str:
+    lines: List[str] = []
+    for idx, member in enumerate(members, start=1):
+        text = getattr(member, "text_sub", "") or ""
+        tags = getattr(member, "tags", None)
+        ticket_id = getattr(member, "ticket_id", "") or ""
+        normalized_tags = ", ".join(str(tag).strip() for tag in (tags or []) if str(tag).strip())
+        desc_parts = [f"{idx}."]
+        if ticket_id:
+            desc_parts.append(f"ticket {ticket_id}")
+        if getattr(member, "id", None):
+            desc_parts.append(f"subtask {getattr(member, 'id')}")
+        if text:
+            desc_parts.append(f"\"{str(text).strip()}\"")
+        if normalized_tags:
+            desc_parts.append(f"tags: {normalized_tags}")
+        lines.append(" ".join(desc_parts))
+    if not lines:
+        raise LLMClientError("Affinity narrative requires at least one subtask description.")
+    return "\n".join(lines)
+
+
+def generate_affinity_group_narrative(
+    members: Iterable[Any],
+    llm_options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Produce a natural-language rationale for a set of related subtasks."""
+
+    member_list = list(members)
+    formatted_members = _format_affinity_members(member_list)
+
+    options = dict(llm_options or {})
     model = options.get("model", DEFAULT_MODEL)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are helping project managers explain why subtasks can be batched together. "
+                "Respond with one or two concise sentences summarizing the shared objective."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Here are the subtasks that will be batched:\n"
+                f"{formatted_members}\n"
+                "Explain the common theme or dependency they share."
+            ),
+        },
+    ]
 
     try:
         client = _get_openai_client(options.get("api_key"))
         response = client.responses.create(
             model=model,
             input=[{"role": m["role"], "content": m["content"]} for m in messages],
-            temperature=float(options.get("temperature", 0.3)),
+            temperature=float(options.get("temperature", 0.2)),
         )
     except (APIStatusError, APIConnectionError, RateLimitError) as exc:
         raise LLMClientError(f"OpenAI API error: {exc}") from exc
@@ -161,13 +259,16 @@ def generate_subtask_bullets(ticket: Ticket, llm_options: Optional[Dict[str, Any
 
     raw_text = getattr(response, "output_text", None)
     if not raw_text:
-        # Attempt to recover from the structured format when output_text is unavailable
         try:
             raw_text = response.outputs[0].content[0].text  # type: ignore[attr-defined]
         except Exception as exc:  # pragma: no cover - safety net for API changes
             raise LLMClientError(f"OpenAI response did not include text output: {exc}") from exc
 
-    return _parse_response(raw_text, ticket.tech or [])
+    narrative = str(raw_text).strip()
+    if not narrative:
+        raise LLMClientError("LLM affinity narrative was empty.")
+
+    return narrative
 
 
 def reset_cached_client() -> None:

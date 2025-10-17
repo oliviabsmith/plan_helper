@@ -3,16 +3,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from collections import Counter, defaultdict
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select
 
 from db.models import (
     PlanItem, PlanItemSubtask, Subtask, Ticket,
     PlanBucket, MemorySnippet
 )
+
+from logic.llm_client import LLMClientError
+from logic.report_narrative import make_morning_narrative
 
 @dataclass
 class ChecklistItem:
@@ -31,12 +34,21 @@ class BatchOut:
     rationale: str             # echo of note or brief reason
 
 @dataclass
+class NarrativeSection:
+    text: Optional[str]
+    context_tags: List[str]
+    memory_refs: List[str]
+    error: Optional[str] = None
+
+
+@dataclass
 class MorningReport:
     date: str
     checklist: List[ChecklistItem]
     batches: List[BatchOut]
     risks: List[str]
     memory_top3: List[dict]    # [{id, topic, text, pinned, created_at}]
+    narrative: Optional[NarrativeSection] = None
 
 def _collect_today_plan(s: Session, d: date):
     # Pull today's plan items (Focus/Admin only – skip Meeting if you don’t use it yet)
@@ -109,7 +121,13 @@ def _memory_for_tags(s: Session, tags: list[str], limit: int = 3) -> List[dict]:
         for m in rows
     ]
 
-def make_morning_report(s: Session, d: date) -> MorningReport:
+def make_morning_report(
+    s: Session,
+    d: date,
+    *,
+    include_narrative: bool = False,
+    narrative_options: Optional[Dict[str, Any]] = None,
+) -> MorningReport:
     items, block_subs = _collect_today_plan(s, d)
 
     # Join tickets for due dates
@@ -171,10 +189,54 @@ def make_morning_report(s: Session, d: date) -> MorningReport:
     dom_tags = _dominant_tags(block_subs, k=3)
     mem = _memory_for_tags(s, dom_tags, limit=3)
 
+    narrative_section: Optional[NarrativeSection] = None
+    if include_narrative:
+        memory_refs = [m["id"] for m in mem if m.get("id")]
+        payload = {
+            "date": d.isoformat(),
+            "checklist": [
+                {
+                    "ticket_id": item.ticket_id,
+                    "seq": item.seq,
+                    "text_sub": item.text_sub,
+                    "why_now": item.why_now,
+                    "tags": item.tags,
+                }
+                for item in checklist
+            ],
+            "batches": [
+                {
+                    "note": batch.note,
+                    "member_count": len(batch.members),
+                    "members": batch.members,
+                    "rationale": batch.rationale,
+                }
+                for batch in batches
+            ],
+            "risks": list(risks),
+            "context_tags": list(dom_tags),
+            "memory": mem,
+        }
+        try:
+            text = make_morning_narrative(payload, llm_options=narrative_options or {})
+            narrative_section = NarrativeSection(
+                text=text.strip() if text else None,
+                context_tags=list(dom_tags),
+                memory_refs=memory_refs,
+            )
+        except LLMClientError as exc:
+            narrative_section = NarrativeSection(
+                text=None,
+                context_tags=list(dom_tags),
+                memory_refs=memory_refs,
+                error=str(exc),
+            )
+
     return MorningReport(
         date=d.isoformat(),
         checklist=checklist,
         batches=batches,
         risks=risks,
-        memory_top3=mem
+        memory_top3=mem,
+        narrative=narrative_section,
     )
