@@ -5,6 +5,7 @@ import { api, AffinityComputeRequest, AffinityGroup } from "../../api/client";
 import { Button } from "../../components/Button";
 import { TextInput } from "../../components/Input";
 import { AsyncState } from "../../components/AsyncState";
+import { SubtaskIdChip } from "../../components/SubtaskIdChip";
 
 interface ComputeFormValues {
   status: string;
@@ -89,22 +90,42 @@ export function AffinityPage() {
             </div>
           ) : (
             groups.map((group: AffinityGroup) => (
-              <article key={group.key} className="flex flex-col gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
+              <article
+                key={group.key}
+                className="flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner shadow-slate-900/30"
+              >
+                <header className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1">
                     <h3 className="text-base font-semibold text-slate-100">{group.key}</h3>
-                    {group.rationale && <p className="text-xs text-slate-400">{group.rationale}</p>}
+                    {group.rationale && (
+                      <p className="text-xs leading-relaxed text-slate-400">{group.rationale}</p>
+                    )}
                   </div>
-                  <span className="rounded-full bg-primary-500/20 px-3 py-1 text-xs font-medium text-primary-200">
+                  <span className="rounded-full border border-primary-500/40 bg-primary-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-primary-200">
                     {group.members.length} subtasks
                   </span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {group.members.map((member) => (
-                    <span key={member} className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">
-                      {member}
-                    </span>
-                  ))}
+                </header>
+
+                <div className="grid gap-3">
+                  <div className="rounded-lg border border-slate-800/60 bg-slate-900/70 p-3 text-xs text-slate-300">
+                    <p className="font-semibold text-slate-200">Why this grouping</p>
+                    <p className="mt-1 text-slate-400">
+                      {group.rationale || "Related subtasks sharing tags or focus areas."}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-slate-800/70 bg-slate-950/40 p-3">
+                    <div className="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-500">
+                      <span>Members</span>
+                      <span>{group.members.length}</span>
+                    </div>
+                    <div className="mt-2 max-h-48 space-y-2 overflow-y-auto pr-1">
+                      <div className="flex flex-wrap gap-1.5">
+                        {group.members.map((member) => (
+                          <SubtaskIdChip key={member} value={member} className="px-2 py-0.5 text-[11px]" />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </article>
             ))

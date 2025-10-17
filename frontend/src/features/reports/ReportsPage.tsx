@@ -11,6 +11,7 @@ import {
 } from "../../api/client";
 import { Button } from "../../components/Button";
 import { TextArea, TextInput } from "../../components/Input";
+import { SubtaskIdChip } from "../../components/SubtaskIdChip";
 
 interface MorningFormValues {
   date: string;
@@ -105,7 +106,10 @@ export function ReportsPage() {
             {morningReport.checklist.map((item) => (
               <li key={item.subtask_id} className="rounded-md border border-slate-800/80 bg-slate-900/70 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-mono text-xs text-primary-200">{item.ticket_id} · {item.seq}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <SubtaskIdChip value={item.subtask_id} className="px-2 py-0.5 text-[11px]" />
+                    <span className="font-mono text-xs text-primary-200">{item.ticket_id} · {item.seq}</span>
+                  </div>
                   <span className="text-xs text-slate-400">{item.tags.join(", ")}</span>
                 </div>
                 <p className="mt-2 text-slate-100">{item.text_sub}</p>
@@ -122,7 +126,11 @@ export function ReportsPage() {
                 <li key={batch.note} className="rounded-md border border-slate-800/80 bg-slate-900/70 p-3">
                   <p className="font-semibold text-slate-100">{batch.note}</p>
                   {batch.rationale && <p className="text-xs text-slate-400">{batch.rationale}</p>}
-                  <p className="mt-1 text-xs text-slate-400">Members: {batch.members.join(", ")}</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {batch.members.map((member) => (
+                      <SubtaskIdChip key={member} value={member} className="px-2 py-0.5 text-[11px]" />
+                    ))}
+                  </div>
                 </li>
               ))}
             </ul>
@@ -157,7 +165,14 @@ export function ReportsPage() {
                 </div>
                 {item.notes && <p className="mt-2 text-sm text-slate-100">{item.notes}</p>}
                 {item.subtask_ids.length > 0 && (
-                  <p className="mt-2 text-xs text-slate-400">Subtasks: {item.subtask_ids.join(", ")}</p>
+                  <div className="mt-3 rounded-md border border-slate-800/70 bg-slate-900/70 p-2">
+                    <p className="text-[11px] uppercase tracking-wide text-slate-500">Subtasks</p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {item.subtask_ids.map((sid) => (
+                        <SubtaskIdChip key={sid} value={sid} className="px-2 py-0.5 text-[11px]" />
+                      ))}
+                    </div>
+                  </div>
                 )}
               </li>
             ))}

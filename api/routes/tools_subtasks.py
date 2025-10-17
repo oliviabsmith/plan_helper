@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from api.deps import SessionLocal
 from db.models import Ticket, Subtask, SubtaskStatus
+from db.queries import mark_subtasks_status
 from logic.decomposer import generate_bullets
 from logic.llm_client import LLMClientError
 
@@ -30,6 +31,21 @@ list_in = ns.model("ListIn", {
     "ticket_id": fields.String(required=False),
     "status": fields.List(fields.String, required=False)
 })
+
+mark_status_in = ns.model(
+    "MarkStatusIn",
+    {
+        "subtask_ids": fields.List(fields.String, required=True, description="IDs to update"),
+        "status": fields.String(required=True, description="New status value"),
+    },
+)
+
+mark_status_out = ns.model(
+    "MarkStatusOut",
+    {
+        "updated": fields.Integer,
+    },
+)
 
 @ns.route("/create_for_ticket")
 class CreateForTicket(Resource):
@@ -113,3 +129,29 @@ class List(Resource):
                     "status": st.status.value, "est_hours": float(st.est_hours) if st.est_hours is not None else None
                 } for st in subs
             ]
+
+
+@ns.route("/mark_status")
+class MarkStatus(Resource):
+    @ns.expect(mark_status_in)
+    @ns.marshal_with(mark_status_out)
+    def post(self):
+        body = request.get_json(force=True) or {}
+        ids = body.get("subtask_ids") or []
+        status_value = body.get("status")
+
+        if not status_value:
+            ns.abort(400, message="status is required")
+
+        try:
+            status = SubtaskStatus(status_value)
+        except ValueError:
+            ns.abort(400, message=f"Unknown subtask status: {status_value}")
+
+        if not ids:
+            return {"updated": 0}
+
+        with SessionLocal() as s:
+            updated = mark_subtasks_status(s, ids, status)
+            s.commit()
+            return {"updated": updated}
