@@ -3,6 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Dict, Tuple, Optional
 from collections import defaultdict
+import logging
+
+from logic.llm_client import (
+    LLMClientError,
+    generate_affinity_group_narrative,
+)
+
+logger = logging.getLogger(__name__)
 
 # Simple tag conventions
 ENV_TAGS = {"dev", "development", "staging", "stage", "preprod", "prod", "production"}
@@ -77,6 +85,13 @@ def compute_affinity_groups(subtasks: Iterable[SubtaskLike]) -> List[AffinityGro
         if not why:
             why.append("similar tags")
         rationale = "; ".join(why)
+        try:
+            narrative = generate_affinity_group_narrative(members)
+        except LLMClientError as exc:
+            logger.warning("LLM affinity narrative failed for key %s: %s", key, exc)
+            narrative = ""
+        if narrative:
+            rationale = f"{rationale} | {narrative}"
         groups.append(
             AffinityGroupOut(
                 key=key,
