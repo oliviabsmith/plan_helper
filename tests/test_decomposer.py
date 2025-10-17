@@ -21,7 +21,7 @@ sys.modules.setdefault("db", db_module)
 sys.modules["db.models"] = models_module
 
 from logic import decomposer
-from logic.llm_client import LLMClientError
+from logic.llm_client import LLMClientError, SUBTASK_GENERATION_DEFAULTS
 
 
 def test_generate_bullets_llm_success(monkeypatch):
@@ -38,7 +38,8 @@ def test_generate_bullets_llm_success(monkeypatch):
     bullets = decomposer.generate_bullets(ticket, llm_options={"tone": "concise"})
 
     assert bullets == [{"text_sub": "LLM generated", "tags": ["python"], "est_hours": 2.0}]
-    assert captured["llm_options"] == {"tone": "concise"}
+    expected_options = {**SUBTASK_GENERATION_DEFAULTS, "tone": "concise"}
+    assert captured["llm_options"] == expected_options
     assert captured["ticket"] is ticket
 
 
