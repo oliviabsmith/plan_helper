@@ -1,4 +1,11 @@
+import logging
+from typing import Any, Dict, List, Optional
+
 from db.models import Ticket
+from logic.llm_client import LLMClientError, generate_subtask_bullets
+
+logger = logging.getLogger(__name__)
+
 
 def sp_to_count(sp: int) -> int:
     if sp <= 1: return 1
@@ -7,7 +14,8 @@ def sp_to_count(sp: int) -> int:
     if sp >= 5: return 5
     return 3
 
-def generate_bullets(ticket: Ticket) -> list[dict]:
+
+def _template_fallback(ticket: Ticket) -> List[Dict[str, Any]]:
     n = sp_to_count(ticket.story_points)
     base = ticket.title.strip()
     tags = (ticket.tech or [])[:]
@@ -22,3 +30,16 @@ def generate_bullets(ticket: Ticket) -> list[dict]:
     for i in range(n):
         out.append({"text_sub": templates[i], "tags": tags, "est_hours": 1.0 if i == 0 else 1.5})
     return out
+
+
+def generate_bullets(ticket: Ticket, *, llm_options: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Generate subtasks for a ticket via LLM with template fallback."""
+
+    try:
+        bullets = generate_subtask_bullets(ticket, llm_options=llm_options)
+        if bullets:
+            return bullets
+    except LLMClientError as exc:
+        logger.warning("LLM subtask generation failed; using template fallback: %s", exc)
+
+    return _template_fallback(ticket)
