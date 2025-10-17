@@ -14,6 +14,7 @@ from db.models import (
     AffinityGroup, AffinityMember,
     PlanItem, PlanItemSubtask, PlanBucket
 )
+from logic.llm_client import summarize_focus_block
 
 # --------------------------
 # Constraints + parameters
@@ -155,7 +156,24 @@ def build_plan(
                 day_contexts.add(ctx_part)
                 ids = [str(st.id) for st in sts if str(st.id) not in used_subtasks]
                 if ids:
-                    blocks_today.append(PlannedBlock(date=d, bucket=PlanBucket.Focus, note=key, subtask_ids=ids))
+                    note_payload = []
+                    for st in sts:
+                        if str(st.id) in ids:
+                            due_date = due.get(st.ticket_id)
+                            note_payload.append(
+                                {
+                                    "subtask_id": str(st.id),
+                                    "ticket_id": st.ticket_id,
+                                    "detail": st.text_sub,
+                                    "due_date": due_date.isoformat() if due_date else "",
+                                }
+                            )
+                    note_text = summarize_focus_block(
+                        block_date=d,
+                        items=note_payload,
+                        fallback_note=key,
+                    )
+                    blocks_today.append(PlannedBlock(date=d, bucket=PlanBucket.Focus, note=note_text, subtask_ids=ids))
                     used_subtasks.update(ids)
                     fb += 1
             # else: skip this batch for today (it will be reconsidered tomorrow)
@@ -181,9 +199,23 @@ def build_plan(
                 # can't add a new context today; push to next day by just not scheduling now
                 continue
 
+            fallback_note = dom_key or f"solo:{pick.ticket_id}"
+            pick_due = due.get(pick.ticket_id)
+            note_text = summarize_focus_block(
+                block_date=d,
+                items=[
+                    {
+                        "subtask_id": str(pick.id),
+                        "ticket_id": pick.ticket_id,
+                        "detail": pick.text_sub,
+                        "due_date": pick_due.isoformat() if pick_due else "",
+                    }
+                ],
+                fallback_note=fallback_note,
+            )
             blocks_today.append(PlannedBlock(
                 date=d, bucket=PlanBucket.Focus,
-                note=dom_key or f"solo:{pick.ticket_id}",
+                note=note_text,
                 subtask_ids=[str(pick.id)]
             ))
             used_subtasks.add(str(pick.id))

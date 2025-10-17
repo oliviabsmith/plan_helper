@@ -1,12 +1,13 @@
-"""LLM helper utilities for generating subtasks."""
+"""LLM helper utilities for generating subtasks and summaries."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+from datetime import date
 from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from openai import OpenAI
 from openai import APIStatusError, APIConnectionError, RateLimitError
@@ -172,3 +173,130 @@ def reset_cached_client() -> None:
     """Clear the cached OpenAI client. Intended for use in tests."""
 
     _get_openai_client.cache_clear()
+
+
+def _build_focus_summary_prompt(
+    block_date: str,
+    fallback_note: str,
+    items: Tuple[Tuple[str, str, str, str], ...],
+) -> List[Dict[str, str]]:
+    system_lines = [
+        "You are an engineering planning assistant summarizing a focus block for a daily plan.",
+        "Return a concise, human-friendly note (<= 140 characters).",
+        "Highlight any urgent risks if a due date is within 3 days of the block date.",
+        "Do not add markdown bullets or extra commentary.",
+    ]
+
+    subtask_lines = [
+        f"- Subtask {idx+1}: ticket={ticket_id or 'n/a'} | due={due or 'unscheduled'} | detail={detail}"
+        for idx, (_, ticket_id, detail, due) in enumerate(items)
+    ]
+
+    user_lines = [
+        f"Focus date: {block_date}",
+        "Existing label: " + (fallback_note or "(none)"),
+        "Subtasks:",
+        *subtask_lines,
+        "Craft a short note capturing the theme. Call out risks if needed.",
+    ]
+
+    return [
+        {"role": "system", "content": "\n".join(system_lines)},
+        {"role": "user", "content": "\n".join(user_lines)},
+    ]
+
+
+@lru_cache(maxsize=256)
+def _summarize_focus_block_cached(
+    block_date: str,
+    fallback_note: str,
+    items: Tuple[Tuple[str, str, str, str], ...],
+    model: str,
+    temperature: float,
+) -> str:
+    if not items:
+        return fallback_note
+
+    messages = _build_focus_summary_prompt(block_date, fallback_note, items)
+
+    try:
+        client = _get_openai_client(None)
+        response = client.responses.create(
+            model=model,
+            input=[{"role": m["role"], "content": m["content"]} for m in messages],
+            temperature=temperature,
+        )
+    except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+        raise LLMClientError(f"OpenAI API error: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - safeguard
+        raise LLMClientError(f"Unexpected error while calling OpenAI API: {exc}") from exc
+
+    raw_text = getattr(response, "output_text", None)
+    if not raw_text:
+        try:
+            raw_text = response.outputs[0].content[0].text  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - safety net
+            raise LLMClientError(f"OpenAI response did not include text output: {exc}") from exc
+
+    cleaned = str(raw_text).strip()
+    return cleaned or fallback_note
+
+
+def summarize_focus_block(
+    block_date: date,
+    items: Sequence[Dict[str, Any]],
+    fallback_note: str,
+    llm_options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate a concise note for a focus block using the LLM.
+
+    Parameters
+    ----------
+    block_date:
+        Date the focus block is scheduled.
+    items:
+        Sequence of dictionaries describing each subtask. Expected keys include
+        ``subtask_id``, ``ticket_id``, ``detail`` (or ``subtask``), and
+        ``due_date`` (ISO string or empty).
+    fallback_note:
+        Existing deterministic label to use if the LLM call fails.
+    llm_options:
+        Optional overrides such as ``model`` or ``temperature``.
+    """
+
+    if not items:
+        return fallback_note
+
+    options = dict(llm_options or {})
+    model = options.get("model", DEFAULT_MODEL)
+    temperature = float(options.get("temperature", 0.2))
+
+    normalized: Tuple[Tuple[str, str, str, str], ...] = tuple(
+        (
+            str(item.get("subtask_id") or ""),
+            str(item.get("ticket_id") or ""),
+            str(item.get("detail") or item.get("subtask") or "").strip(),
+            str(item.get("due_date") or ""),
+        )
+        for item in items
+    )
+
+    try:
+        return _summarize_focus_block_cached(
+            block_date.isoformat(),
+            fallback_note,
+            normalized,
+            model,
+            temperature,
+        )
+    except LLMClientError:
+        return fallback_note
+    except Exception:  # pragma: no cover - defensive guard
+        logger.exception("Focus block summarization failed; using fallback note '%s'", fallback_note)
+        return fallback_note
+
+
+def reset_focus_note_cache() -> None:
+    """Clear the focus note memoization cache (useful for tests)."""
+
+    _summarize_focus_block_cached.cache_clear()
