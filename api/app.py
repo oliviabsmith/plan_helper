@@ -1,4 +1,5 @@
 from flask import Flask
+from flask_cors import CORS
 from flask_restx import Api
 from api.routes.tools_ticket_store import ns as ticket_ns
 from api.routes.tools_subtasks import ns as subtasks_ns
@@ -9,6 +10,7 @@ from flask_cors import CORS
 
 def create_app():
     app = Flask(__name__)
+    CORS(app, resources={r"/tools/*": {"origins": "*"}})
     api = Api(app, title="Sprint Planner Tools", version="0.1", doc="/docs")
 
     CORS(app, resources={r"/tools/*": {"origins": "*"}})
