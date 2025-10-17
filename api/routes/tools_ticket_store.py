@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 from api.deps import SessionLocal
 from db.models import Ticket, TicketStatus
 
-ns = Namespace("ticket_store", description="Manual upload & search tickets")
+#ns = Namespace("ticket_store", description="Manual upload & search tickets")
+ns = Namespace("tickets", description="Manual upload & search tickets", path="")
+
 
 upload_in = ns.model("UploadIn", {
     "tickets": fields.List(fields.Raw, required=True, description="Array of ticket dicts")

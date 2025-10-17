@@ -5,15 +5,28 @@ from api.routes.tools_subtasks import ns as subtasks_ns
 from api.routes.tools_affinity import ns as affinity_ns
 from api.routes.tools_planner import ns as planner_ns
 from api.routes.tools_reports import ns as reports_ns
+from flask_cors import CORS
 
 def create_app():
     app = Flask(__name__)
     api = Api(app, title="Sprint Planner Tools", version="0.1", doc="/docs")
+
+    CORS(app, resources={r"/tools/*": {"origins": "*"}})
+
     api.add_namespace(ticket_ns, path="/tools/tickets")
     api.add_namespace(subtasks_ns, path="/tools/subtasks")
     api.add_namespace(affinity_ns, path="/tools/affinity")
     api.add_namespace(planner_ns, path="/tools/planner")
     api.add_namespace(reports_ns, path="/tools/reports")
+
+    @app.route("/")
+    def index():
+        """Provide a friendly landing page for the API root."""
+
+        return {
+            "message": "Sprint Planner Tools API",
+            "docs_url": "/docs",
+        }
 
 
 
