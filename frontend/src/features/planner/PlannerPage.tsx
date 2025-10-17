@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { ReactElement, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
@@ -18,9 +18,13 @@ interface PlannerFormValues {
   clear_existing_from_start: boolean;
 }
 
+type PlannerViewMode = "day" | "week";
+
 export function PlannerPage() {
   const queryClient = useQueryClient();
   const [generatedPlan, setGeneratedPlan] = useState<PlannedBlock[] | null>(null);
+  const [generatedViewMode, setGeneratedViewMode] = useState<PlannerViewMode>("day");
+  const [persistedViewMode, setPersistedViewMode] = useState<PlannerViewMode>("day");
 
   const form = useForm<PlannerFormValues>({
     defaultValues: {
@@ -65,82 +69,60 @@ export function PlannerPage() {
     },
   });
 
-  const renderTimeline = (blocks: PlannedBlock[]) => {
-    if (!blocks.length) {
-      return (
-        <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/60 p-6 text-sm text-slate-400">
-          Plan response was empty.
-        </div>
-      );
-    }
-
-    const grouped = blocks.reduce<Record<string, PlannedBlock[]>>((acc, block) => {
-      acc[block.date] = acc[block.date] ?? [];
-      acc[block.date].push(block);
-      return acc;
-    }, {});
-
-    const dates = Object.keys(grouped).sort();
-
-    return (
-      <div className="space-y-5">
-        {dates.map((date) => (
-          <section key={date} className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">{date}</h3>
-              <div className="h-px flex-1 translate-y-1 border-b border-dashed border-slate-800/70" />
-            </div>
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              {grouped[date].map((block) => (
-                <PlanBlockCard
-                  key={`${block.date}-${block.bucket}-${block.note ?? ""}`}
-                  bucket={block.bucket}
-                  note={block.note}
-                  subtaskIds={block.subtask_ids}
-                />
-              ))}
-            </div>
-          </section>
-        ))}
-      </div>
-    );
-  };
-
-  const renderExistingPlan = (items: PlanItem[]) => {
+  const renderPlanTimeline = <T extends { date: string }>(
+    items: T[],
+    mode: PlannerViewMode,
+    renderCard: (item: T, index: number) => ReactElement,
+    emptyMessage: string,
+  ) => {
     if (!items.length) {
       return (
         <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/60 p-6 text-sm text-slate-400">
-          No plan persisted yet. Generate one to populate the database.
+          {emptyMessage}
         </div>
       );
     }
 
-    const grouped = items.reduce<Record<string, PlanItem[]>>((acc, item) => {
-      acc[item.date] = acc[item.date] ?? [];
-      acc[item.date].push(item);
-      return acc;
-    }, {});
-
-    const dates = Object.keys(grouped).sort();
+    const groups = buildPlanGroups(items, mode);
 
     return (
       <div className="space-y-5">
-        {dates.map((date) => (
-          <section key={date} className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">{date}</h3>
-              <div className="h-px flex-1 translate-y-1 border-b border-dashed border-slate-800/70" />
+        {groups.map((group) => (
+          <section key={group.key} className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+            <div className="flex items-center justify-between gap-4">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">{group.label}</h3>
+              <div className="hidden h-px flex-1 translate-y-1 border-b border-dashed border-slate-800/70 sm:block" />
             </div>
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              {grouped[date].map((item) => (
-                <PlanBlockCard
-                  key={item.id}
-                  bucket={item.bucket}
-                  note={item.notes}
-                  subtaskIds={item.subtask_ids}
-                />
-              ))}
-            </div>
+            {mode === "day" ? (
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                {group.days[0]?.items.map((item, index) => renderCard(item, index))}
+              </div>
+            ) : (
+              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
+                {group.days.map((day) => (
+                  <div
+                    key={day.date}
+                    className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3"
+                  >
+                    <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+                      <span>{day.label}</span>
+                      {day.items.length > 0 && (
+                        <span className="rounded-full bg-primary-500/10 px-2 py-0.5 text-[10px] font-semibold text-primary-200">
+                          {day.items.length} blocks
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-3">
+                      {day.items.length > 0 ? (
+                        day.items.map((item, index) => renderCard(item, index))
+                      ) : (
+                        <p className="text-[11px] text-slate-500">No focus blocks</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         ))}
       </div>
@@ -197,22 +179,58 @@ export function PlannerPage() {
 
       {generatedPlan && (
         <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6 shadow-lg shadow-slate-900/30">
-          <h2 className="text-lg font-semibold text-slate-100">Latest generated plan</h2>
-          <p className="mb-4 text-sm text-slate-400">This is the direct response from the planner endpoint.</p>
-          {renderTimeline(generatedPlan)}
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-100">Latest generated plan</h2>
+              <p className="text-sm text-slate-400">This is the direct response from the planner endpoint.</p>
+            </div>
+            <PlannerViewToggle value={generatedViewMode} onChange={setGeneratedViewMode} />
+          </div>
+          {renderPlanTimeline(
+            generatedPlan,
+            generatedViewMode,
+            (block, index) => (
+              <PlanBlockCard
+                key={`${block.date}-${block.bucket}-${block.note ?? ""}-${index}`}
+                bucket={block.bucket}
+                note={block.note}
+                subtaskIds={block.subtask_ids}
+              />
+            ),
+            "Plan response was empty.",
+          )}
         </section>
       )}
 
       <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6 shadow-lg shadow-slate-900/30">
-        <h2 className="text-lg font-semibold text-slate-100">Persisted plan timeline</h2>
-        <p className="mb-4 text-sm text-slate-400">Data pulled from <code className="font-mono">/tools/planner/list</code>.</p>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-100">Persisted plan timeline</h2>
+            <p className="text-sm text-slate-400">
+              Data pulled from <code className="font-mono">/tools/planner/list</code>.
+            </p>
+          </div>
+          <PlannerViewToggle value={persistedViewMode} onChange={setPersistedViewMode} />
+        </div>
         <AsyncState
           isLoading={existingPlanQuery.isLoading}
           isError={existingPlanQuery.isError}
           errorMessage={existingPlanQuery.error instanceof Error ? existingPlanQuery.error.message : undefined}
         >
           <div className="space-y-6">
-            {renderExistingPlan(existingPlanQuery.data ?? [])}
+            {renderPlanTimeline(
+              existingPlanQuery.data ?? [],
+              persistedViewMode,
+              (item, index) => (
+                <PlanBlockCard
+                  key={`${item.id}-${index}`}
+                  bucket={item.bucket}
+                  note={item.notes}
+                  subtaskIds={item.subtask_ids}
+                />
+              ),
+              "No plan persisted yet. Generate one to populate the database.",
+            )}
             {existingPlanQuery.data && existingPlanQuery.data.length > 0 && (
               <PlanCalendar items={existingPlanQuery.data} />
             )}
@@ -232,6 +250,117 @@ interface PlanBlockCardProps {
   bucket: string;
   note: string | null;
   subtaskIds: string[];
+}
+
+interface PlannerViewToggleProps {
+  value: PlannerViewMode;
+  onChange: (mode: PlannerViewMode) => void;
+}
+
+interface PlanGroupDay<T> {
+  date: string;
+  label: string;
+  items: T[];
+}
+
+interface PlanGroup<T> {
+  key: string;
+  label: string;
+  days: PlanGroupDay<T>[];
+}
+
+function buildPlanGroups<T extends { date: string }>(items: T[], mode: PlannerViewMode): PlanGroup<T>[] {
+  if (mode === "day") {
+    const byDate = new Map<string, T[]>();
+    items.forEach((item) => {
+      const list = byDate.get(item.date) ?? [];
+      list.push(item);
+      byDate.set(item.date, list);
+    });
+
+    return Array.from(byDate.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, dayItems]) => {
+        const dateObj = parseIsoDate(date);
+        return {
+          key: date,
+          label: formatFullDateLabel(dateObj),
+          days: [
+            {
+              date,
+              label: formatWeekdayLabel(dateObj),
+              items: dayItems,
+            },
+          ],
+        } satisfies PlanGroup<T>;
+      });
+  }
+
+  const weeks = new Map<string, { start: Date; days: Map<string, T[]> }>();
+  items.forEach((item) => {
+    const date = parseIsoDate(item.date);
+    const start = startOfWeek(date);
+    const weekKey = toDateKey(start);
+    const entry = weeks.get(weekKey) ?? { start, days: new Map<string, T[]>() };
+    const dayItems = entry.days.get(item.date) ?? [];
+    dayItems.push(item);
+    entry.days.set(item.date, dayItems);
+    weeks.set(weekKey, entry);
+  });
+
+  return Array.from(weeks.values())
+    .sort((a, b) => a.start.getTime() - b.start.getTime())
+    .map(({ start, days }) => {
+      const dayEntries: PlanGroupDay<T>[] = [];
+      for (let offset = 0; offset < 7; offset += 1) {
+        const dayDate = new Date(start);
+        dayDate.setDate(start.getDate() + offset);
+        const dayKey = toDateKey(dayDate);
+        dayEntries.push({
+          date: dayKey,
+          label: formatWeekdayLabel(dayDate),
+          items: days.get(dayKey) ?? [],
+        });
+      }
+
+      return {
+        key: toDateKey(start),
+        label: formatWeekLabel(start),
+        days: dayEntries,
+      } satisfies PlanGroup<T>;
+    });
+}
+
+function PlannerViewToggle({ value, onChange }: PlannerViewToggleProps) {
+  const options: { value: PlannerViewMode; label: string }[] = [
+    { value: "day", label: "Daily" },
+    { value: "week", label: "Weekly" },
+  ];
+
+  return (
+    <div className="flex items-center gap-2 text-xs text-slate-400">
+      <span className="hidden font-medium uppercase tracking-wide text-slate-500 sm:inline">View</span>
+      <div className="inline-flex rounded-md border border-slate-800 bg-slate-950/60 p-1">
+        {options.map((option) => {
+          const isActive = option.value === value;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onChange(option.value)}
+              className={`rounded px-3 py-1 text-xs font-semibold uppercase tracking-wide transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-400 ${
+                isActive
+                  ? "bg-primary-500/20 text-primary-100 shadow-inner shadow-primary-900/40"
+                  : "text-slate-400 hover:text-slate-100"
+              }`}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function PlanBlockCard({ bucket, note, subtaskIds }: PlanBlockCardProps) {
@@ -266,6 +395,36 @@ function PlanBlockCard({ bucket, note, subtaskIds }: PlanBlockCardProps) {
       )}
     </article>
   );
+}
+
+function startOfWeek(date: Date) {
+  const base = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const offset = (base.getDay() + 6) % 7; // convert to Monday start
+  base.setDate(base.getDate() - offset);
+  return base;
+}
+
+function formatFullDateLabel(date: Date) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  }).format(date);
+}
+
+function formatWeekLabel(date: Date) {
+  return `Week of ${new Intl.DateTimeFormat(undefined, {
+    month: "long",
+    day: "numeric",
+  }).format(date)}`;
+}
+
+function formatWeekdayLabel(date: Date) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  }).format(date);
 }
 
 function ExpandableSubtaskList({ ids }: { ids: string[] }) {
