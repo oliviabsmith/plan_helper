@@ -47,7 +47,7 @@ db-reset:
 # API server
 # -----------------------------
 api-run:
-        $(EXPORT_ENV) $(PYTHON) -m api.app
+	$(EXPORT_ENV) $(PYTHON) -m api.app
 
 # -----------------------------
 # Frontend helpers
@@ -55,20 +55,20 @@ api-run:
 .PHONY: frontend-install frontend-build frontend-dev dev-stack
 
 frontend-install:
-        cd frontend && npm install
+	cd frontend && npm install
 
 frontend-build:
-        cd frontend && npm run build
+	cd frontend && npm run build
 
 frontend-dev:
-        cd frontend && npm run dev -- --host 0.0.0.0
+	cd frontend && npm run dev -- --host 0.0.0.0
 
 dev-stack:
-        @echo "Starting Flask API on :8080 and Vite dev server on :5173"
-        @trap 'kill 0' INT TERM EXIT; \
-                ( $(MAKE) api-run ) & \
-                ( cd frontend && npm run dev -- --host 0.0.0.0 ); \
-                wait
+	@echo "Starting Flask API on :8080 and Vite dev server on :5173"
+	@trap 'kill 0' INT TERM EXIT; \
+	( $(MAKE) api-run ) & \
+	( cd frontend && npm run dev -- --host 0.0.0.0 ); \
+	wait
 
 # -----------------------------
 # Demo / pipeline helpers
