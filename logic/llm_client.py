@@ -1,4 +1,4 @@
-"""LLM helper utilities for generating subtasks."""
+"""LLM helper utilities for generating subtasks and summaries."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import json
 import logging
 import os
 from functools import lru_cache
+from dataclasses import dataclass
+from datetime import date
 from typing import Any, Dict, Iterable, List, Optional
 
 from openai import OpenAI
@@ -172,3 +174,88 @@ def reset_cached_client() -> None:
     """Clear the cached OpenAI client. Intended for use in tests."""
 
     _get_openai_client.cache_clear()
+
+
+@dataclass
+class BlockedSummary:
+    """Detail for a blocked subtask included in an evening summary."""
+
+    item: str
+    note: str
+
+
+@dataclass
+class EveningSummaryContext:
+    """Structured payload describing daily progress for summary generation."""
+
+    date: date
+    completed: List[str]
+    in_progress: List[str]
+    blocked: List[BlockedSummary]
+    carry_over: List[str]
+    notes: List[str]
+
+
+def _build_evening_summary_prompt(context: EveningSummaryContext) -> List[Dict[str, str]]:
+    system_lines = [
+        "You are a delivery lead writing end-of-day updates for stakeholders.",
+        "Summaries must highlight progress, note any blockers, and reference carry-over work.",
+        "Keep the response to 2-3 concise sentences (under 120 words).",
+    ]
+
+    user_lines = [f"Date: {context.date.isoformat()}" ]
+
+    def _append_section(title: str, lines: Iterable[str]) -> None:
+        items = [line.strip() for line in lines if line.strip()]
+        if not items:
+            user_lines.append(f"{title}: none.")
+        else:
+            user_lines.append(f"{title}:")
+            user_lines.extend(f"- {item}" for item in items)
+
+    _append_section("Completed", context.completed)
+    _append_section("In progress", context.in_progress)
+    _append_section(
+        "Blocked",
+        (f"{b.item} — {b.note}" if b.note else b.item for b in context.blocked),
+    )
+    _append_section("Carry-over", context.carry_over)
+    _append_section("Additional notes", context.notes)
+
+    messages = [
+        {"role": "system", "content": "\n".join(system_lines)},
+        {"role": "user", "content": "\n".join(user_lines)},
+    ]
+    return messages
+
+
+def generate_evening_summary(
+    context: EveningSummaryContext,
+    llm_options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate a concise end-of-day summary using the LLM."""
+
+    options = dict(llm_options or {})
+    messages = _build_evening_summary_prompt(context)
+    model = options.get("model", DEFAULT_MODEL)
+
+    try:
+        client = _get_openai_client(options.get("api_key"))
+        response = client.responses.create(
+            model=model,
+            input=[{"role": m["role"], "content": m["content"]} for m in messages],
+            temperature=float(options.get("temperature", 0.4)),
+        )
+    except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+        raise LLMClientError(f"OpenAI API error: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - safeguard
+        raise LLMClientError(f"Unexpected error while calling OpenAI API: {exc}") from exc
+
+    raw_text = getattr(response, "output_text", None)
+    if not raw_text:
+        try:
+            raw_text = response.outputs[0].content[0].text  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - safety net for API changes
+            raise LLMClientError(f"OpenAI response did not include text output: {exc}") from exc
+
+    return raw_text.strip()
