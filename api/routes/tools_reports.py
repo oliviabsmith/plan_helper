@@ -11,7 +11,11 @@ from logic.morning_report import make_morning_report
 ns = Namespace("reports", description="Daily reports (morning/evening)")
 
 morning_in = ns.model("MorningIn", {
-    "date": fields.String(required=False, description="YYYY-MM-DD; default: today (server tz)")
+    "date": fields.String(required=False, description="YYYY-MM-DD; default: today (server tz)"),
+    "narrative": fields.Raw(
+        required=False,
+        description="Set to true to include an LLM narrative or provide {enabled: bool, llm_options: {...}}."
+    ),
 })
 
 checklist_item = ns.model("ChecklistItem", {
@@ -38,12 +42,20 @@ memory_item = ns.model("MemoryItem", {
     "created_at": fields.String,
 })
 
+narrative_out = ns.model("MorningNarrative", {
+    "text": fields.String,
+    "context_tags": fields.List(fields.String),
+    "memory_refs": fields.List(fields.String),
+    "error": fields.String,
+})
+
 morning_out = ns.model("MorningReport", {
     "date": fields.String,
     "checklist": fields.List(fields.Nested(checklist_item)),
     "batches": fields.List(fields.Nested(batch_out)),
     "risks": fields.List(fields.String),
     "memory_top3": fields.List(fields.Nested(memory_item)),
+    "narrative": fields.Nested(narrative_out, allow_null=True),
 })
 
 @ns.route("/morning")
@@ -58,8 +70,26 @@ class Morning(Resource):
         else:
             d = date.today()  # if you need Europe/Madrid specifically, adjust at app level
 
+        narrative_cfg = body.get("narrative")
+        include_narrative = False
+        narrative_options = None
+        if isinstance(narrative_cfg, dict):
+            include_narrative = narrative_cfg.get("enabled", True)
+            narrative_options = narrative_cfg.get("llm_options") or narrative_cfg.get("options")
+        elif isinstance(narrative_cfg, bool):
+            include_narrative = narrative_cfg
+        elif isinstance(narrative_cfg, str):
+            include_narrative = narrative_cfg.strip().lower() not in {"", "false", "0", "no"}
+        elif narrative_cfg is not None:
+            include_narrative = bool(narrative_cfg)
+
         with SessionLocal() as s:  # type: Session
-            rpt = make_morning_report(s, d)
+            rpt = make_morning_report(
+                s,
+                d,
+                include_narrative=include_narrative,
+                narrative_options=narrative_options,
+            )
 
             # Serialize dataclasses to dict
             return {
@@ -84,6 +114,15 @@ class Morning(Resource):
                 ],
                 "risks": rpt.risks,
                 "memory_top3": rpt.memory_top3,
+                "narrative": (
+                    {
+                        "text": rpt.narrative.text,
+                        "context_tags": rpt.narrative.context_tags,
+                        "memory_refs": rpt.narrative.memory_refs,
+                        "error": rpt.narrative.error,
+                    }
+                    if rpt.narrative else None
+                ),
             }
 
 # api/routes/tools_reports.py  (append)
