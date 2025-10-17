@@ -9,6 +9,7 @@ import { Table } from "../../components/Table";
 import { StatusBadge } from "../../components/StatusBadge";
 import { AsyncState } from "../../components/AsyncState";
 import { Modal } from "../../components/Modal";
+import { SubtaskIdChip } from "../../components/SubtaskIdChip";
 
 interface FilterValues {
   ticket_id: string;
@@ -29,6 +30,7 @@ export function SubtasksPage() {
     defaultValues: { ticket_id: "", bullets: "", mode: "append" },
   });
   const queryClient = useQueryClient();
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   const subtasksQuery = useQuery({
     queryKey: ["subtasks", filters],
@@ -62,12 +64,42 @@ export function SubtasksPage() {
     },
   });
 
+  const markDoneMutation = useMutation({
+    mutationFn: async (subtaskId: string) =>
+      api.markSubtasksStatus({ subtask_ids: [subtaskId], status: "done" }),
+    onMutate: (subtaskId) => {
+      setUpdatingId(subtaskId);
+    },
+    onSuccess: (result, subtaskId) => {
+      const label = result.updated === 1 ? "subtask" : "subtasks";
+      toast.success(`Marked ${result.updated} ${label} as done`);
+      queryClient.invalidateQueries({ queryKey: ["subtasks"] });
+      queryClient.invalidateQueries({ queryKey: ["planner"] });
+      queryClient.invalidateQueries({ queryKey: ["affinity"] });
+      setUpdatingId((current) => (current === subtaskId ? null : current));
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : "Failed to update subtask";
+      toast.error(message);
+    },
+    onSettled: () => {
+      setUpdatingId(null);
+    },
+  });
+
   const columns = useMemo(
     () => [
+      {
+        key: "id",
+        header: "Subtask",
+        render: (row: Subtask) => <SubtaskIdChip value={row.id} />,
+        className: "w-48",
+      },
       {
         key: "ticket_id",
         header: "Ticket",
         render: (row: Subtask) => <span className="font-mono text-xs text-primary-200">{row.ticket_id}</span>,
+        className: "w-32",
       },
       {
         key: "seq",
@@ -105,8 +137,30 @@ export function SubtasksPage() {
         render: (row: Subtask) => (row.est_hours ?? "-").toString(),
         className: "w-24",
       },
+      {
+        key: "actions",
+        header: "Actions",
+        className: "w-40",
+        render: (row: Subtask) => (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              className="px-3 py-1 text-xs"
+              disabled={row.status === "done" || markDoneMutation.isPending}
+              onClick={() => markDoneMutation.mutate(row.id)}
+            >
+              {row.status === "done"
+                ? "Completed"
+                : updatingId === row.id && markDoneMutation.isPending
+                  ? "Updating…"
+                  : "Mark done"}
+            </Button>
+          </div>
+        ),
+      },
     ],
-    [],
+    [markDoneMutation.isPending, updatingId],
   );
 
   const handleApplyFilters = (values: FilterValues) => {

@@ -22,8 +22,9 @@ def create_subtasks(s: Session, ticket_id: str, bullets: Iterable[dict]):
         s.add(st); created.append(st)
     return created
 
-def mark_subtasks_status(s: Session, subtask_ids: list, status: SubtaskStatus):
-    s.execute(update(Subtask).where(Subtask.id.in_(subtask_ids)).values(status=status))
+def mark_subtasks_status(s: Session, subtask_ids: list, status: SubtaskStatus) -> int:
+    result = s.execute(update(Subtask).where(Subtask.id.in_(subtask_ids)).values(status=status))
+    return int(result.rowcount or 0)
 
 def find_tickets_by_tech(s: Session, tech_any: list[str]):
     stmt = select(Ticket).where(Ticket.tech.op("&&")(tech_any))  # overlap operator

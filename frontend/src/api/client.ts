@@ -97,6 +97,15 @@ export interface SubtaskListRequest {
   status?: string[];
 }
 
+export interface MarkSubtasksStatusRequest {
+  subtask_ids: string[];
+  status: string;
+}
+
+export interface MarkSubtasksStatusResponse {
+  updated: number;
+}
+
 export interface AffinityComputeRequest {
   status?: string[];
   ticket_ids?: string[];
@@ -228,6 +237,12 @@ export const api = {
 
   createSubtasks: (payload: CreateSubtasksRequest) =>
     request<Subtask[]>("/tools/subtasks/create_for_ticket", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  markSubtasksStatus: (payload: MarkSubtasksStatusRequest) =>
+    request<MarkSubtasksStatusResponse>("/tools/subtasks/mark_status", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
