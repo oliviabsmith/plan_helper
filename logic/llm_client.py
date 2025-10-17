@@ -1,12 +1,13 @@
-"""LLM helper utilities for generating subtasks."""
+"""LLM helper utilities for generating subtasks and summaries."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+from datetime import date
 from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from openai import OpenAI
 from openai import APIStatusError, APIConnectionError, RateLimitError
@@ -274,173 +275,128 @@ def reset_cached_client() -> None:
     _get_openai_client.cache_clear()
 
 
-def _normalize_api_error(exc: Exception) -> LLMClientError:
-    if isinstance(exc, RateLimitError):
-        message = "OpenAI API rate limit exceeded. Please retry shortly."
-    elif isinstance(exc, APIConnectionError):
-        message = "Unable to reach OpenAI API. Check network connectivity and retry."
-    elif isinstance(exc, APIStatusError):
-        status = getattr(exc, "status_code", None)
-        message = f"OpenAI API returned status {status}: {exc}"
-    else:
-        message = f"Unexpected error while calling OpenAI API: {exc}"
-    return LLMClientError(message)
+def _build_focus_summary_prompt(
+    block_date: str,
+    fallback_note: str,
+    items: Tuple[Tuple[str, str, str, str], ...],
+) -> List[Dict[str, str]]:
+    system_lines = [
+        "You are an engineering planning assistant summarizing a focus block for a daily plan.",
+        "Return a concise, human-friendly note (<= 140 characters).",
+        "Highlight any urgent risks if a due date is within 3 days of the block date.",
+        "Do not add markdown bullets or extra commentary.",
+    ]
+
+    subtask_lines = [
+        f"- Subtask {idx+1}: ticket={ticket_id or 'n/a'} | due={due or 'unscheduled'} | detail={detail}"
+        for idx, (_, ticket_id, detail, due) in enumerate(items)
+    ]
+
+    user_lines = [
+        f"Focus date: {block_date}",
+        "Existing label: " + (fallback_note or "(none)"),
+        "Subtasks:",
+        *subtask_lines,
+        "Craft a short note capturing the theme. Call out risks if needed.",
+    ]
+
+    return [
+        {"role": "system", "content": "\n".join(system_lines)},
+        {"role": "user", "content": "\n".join(user_lines)},
+    ]
 
 
-def _extract_text_from_response(response: Any) -> str:
-    raw_text = getattr(response, "output_text", None)
-    if raw_text and str(raw_text).strip():
-        return str(raw_text).strip()
+@lru_cache(maxsize=256)
+def _summarize_focus_block_cached(
+    block_date: str,
+    fallback_note: str,
+    items: Tuple[Tuple[str, str, str, str], ...],
+    model: str,
+    temperature: float,
+) -> str:
+    if not items:
+        return fallback_note
 
-    try:
-        outputs = getattr(response, "outputs", [])
-        for output in outputs or []:
-            content = getattr(output, "content", [])
-            for piece in content or []:
-                text = getattr(piece, "text", None)
-                if text and str(text).strip():
-                    return str(text).strip()
-    except Exception as exc:  # pragma: no cover - safety net for API changes
-        raise LLMClientError(f"OpenAI response parsing failed: {exc}") from exc
-
-    raise LLMClientError("OpenAI response did not include any text output.")
-
-
-def _normalize_messages(messages: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
-    normalized: List[Dict[str, str]] = []
-    for message in messages:
-        role = message.get("role")
-        content = message.get("content")
-        if role is None or content is None:
-            raise LLMClientError("All messages must include 'role' and 'content' fields.")
-        normalized.append({"role": str(role), "content": str(content)})
-    return normalized
-
-
-def _invoke_raw(messages: Sequence[Dict[str, str]], options: Optional[Dict[str, Any]] = None) -> str:
-    prepared = _normalize_messages(messages)
-    call_options = dict(options or {})
-    model = call_options.get("model", DEFAULT_MODEL)
-    temperature = float(call_options.get("temperature", 0.3))
+    messages = _build_focus_summary_prompt(block_date, fallback_note, items)
 
     try:
-        client = _get_openai_client(call_options.get("api_key"))
+        client = _get_openai_client(None)
         response = client.responses.create(
             model=model,
-            input=[{"role": msg["role"], "content": msg["content"]} for msg in prepared],
+            input=[{"role": m["role"], "content": m["content"]} for m in messages],
             temperature=temperature,
         )
     except (APIStatusError, APIConnectionError, RateLimitError) as exc:
-        raise _normalize_api_error(exc) from exc
+        raise LLMClientError(f"OpenAI API error: {exc}") from exc
     except Exception as exc:  # pragma: no cover - safeguard
-        raise _normalize_api_error(exc) from exc
+        raise LLMClientError(f"Unexpected error while calling OpenAI API: {exc}") from exc
 
-    return _extract_text_from_response(response)
+    raw_text = getattr(response, "output_text", None)
+    if not raw_text:
+        try:
+            raw_text = response.outputs[0].content[0].text  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - safety net
+            raise LLMClientError(f"OpenAI response did not include text output: {exc}") from exc
 
-
-def _invoke_with_fallback(
-    messages: Sequence[Dict[str, str]],
-    options: Optional[Dict[str, Any]] = None,
-    fallback_temperature: float = 0.0,
-) -> str:
-    try:
-        return _invoke_raw(messages, options)
-    except LLMClientError as exc:
-        starting_temperature = float((options or {}).get("temperature", 0.3))
-        if starting_temperature <= fallback_temperature:
-            raise
-        logger.warning(
-            "Retrying OpenAI call with deterministic fallback temperature %s after error: %s",
-            fallback_temperature,
-            exc,
-        )
-        retry_options = dict(options or {})
-        retry_options["temperature"] = fallback_temperature
-        return _invoke_raw(messages, retry_options)
+    cleaned = str(raw_text).strip()
+    return cleaned or fallback_note
 
 
-def request_summary(subject: str, context: str, llm_options: Optional[Dict[str, Any]] = None) -> str:
-    """Generate a concise summary for downstream modules."""
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You provide crisp summaries for engineering stakeholders. "
-                "Highlight the most relevant outcomes and risks in 3-4 sentences."
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"Subject: {subject}\n\nContext:\n{context.strip()}",
-        },
-    ]
-    return _invoke_with_fallback(messages, llm_options)
-
-
-def request_rationale(decision: str, context: str, llm_options: Optional[Dict[str, Any]] = None) -> str:
-    """Provide a rationale for a decision using shared templates."""
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You explain the reasoning behind engineering decisions. "
-                "Structure the answer with short paragraphs covering drivers, trade-offs, and next steps."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Decision: {decision}\n\nRelevant context:\n{context.strip()}\n"
-                "Summarize why this decision is sound and call out any follow-up work."
-            ),
-        },
-    ]
-    return _invoke_with_fallback(messages, llm_options)
-
-
-def request_planning_guidance(goal: str, constraints: str, llm_options: Optional[Dict[str, Any]] = None) -> str:
-    """Offer planning guidance without duplicating prompt templates."""
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a project planner who drafts lightweight execution guidance. "
-                "Return actionable steps, owners if obvious, and highlight dependencies."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Goal: {goal}\n\nKnown constraints:\n{constraints.strip()}\n"
-                "Provide a short ordered list of next actions."
-            ),
-        },
-    ]
-    return _invoke_with_fallback(messages, llm_options)
-
-
-def single_shot_prompt(system_prompt: str, user_prompt: str, llm_options: Optional[Dict[str, Any]] = None) -> str:
-    """Convenience wrapper for simple prompts."""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-    return _invoke_with_fallback(messages, llm_options)
-
-
-def conversational_prompt(
-    messages: Sequence[Dict[str, str]],
+def summarize_focus_block(
+    block_date: date,
+    items: Sequence[Dict[str, Any]],
+    fallback_note: str,
     llm_options: Optional[Dict[str, Any]] = None,
-    deterministic: bool = False,
 ) -> str:
-    """Helper for multi-turn conversations with optional deterministic behavior."""
+    """Generate a concise note for a focus block using the LLM.
 
-    if deterministic:
-        deterministic_options = dict(llm_options or {})
-        deterministic_options["temperature"] = 0.0
-        return _invoke_raw(messages, deterministic_options)
-    return _invoke_with_fallback(messages, llm_options)
+    Parameters
+    ----------
+    block_date:
+        Date the focus block is scheduled.
+    items:
+        Sequence of dictionaries describing each subtask. Expected keys include
+        ``subtask_id``, ``ticket_id``, ``detail`` (or ``subtask``), and
+        ``due_date`` (ISO string or empty).
+    fallback_note:
+        Existing deterministic label to use if the LLM call fails.
+    llm_options:
+        Optional overrides such as ``model`` or ``temperature``.
+    """
+
+    if not items:
+        return fallback_note
+
+    options = dict(llm_options or {})
+    model = options.get("model", DEFAULT_MODEL)
+    temperature = float(options.get("temperature", 0.2))
+
+    normalized: Tuple[Tuple[str, str, str, str], ...] = tuple(
+        (
+            str(item.get("subtask_id") or ""),
+            str(item.get("ticket_id") or ""),
+            str(item.get("detail") or item.get("subtask") or "").strip(),
+            str(item.get("due_date") or ""),
+        )
+        for item in items
+    )
+
+    try:
+        return _summarize_focus_block_cached(
+            block_date.isoformat(),
+            fallback_note,
+            normalized,
+            model,
+            temperature,
+        )
+    except LLMClientError:
+        return fallback_note
+    except Exception:  # pragma: no cover - defensive guard
+        logger.exception("Focus block summarization failed; using fallback note '%s'", fallback_note)
+        return fallback_note
+
+
+def reset_focus_note_cache() -> None:
+    """Clear the focus note memoization cache (useful for tests)."""
+
+    _summarize_focus_block_cached.cache_clear()
