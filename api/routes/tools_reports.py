@@ -140,6 +140,7 @@ evening_out = ns.model("EveningOut", {
         "notes": fields.String, "subtask_ids": fields.List(fields.String)
     }))),
     "notes": fields.List(fields.String),
+    "summary": fields.String(description="LLM generated end-of-day summary", required=False),
 })
 
 @ns.route("/evening")
@@ -168,5 +169,6 @@ class Evening(Resource):
             result = process_evening_update(s, payload)
             return {
                 "plan_delta": result.plan_delta,
-                "notes": result.notes
+                "notes": result.notes,
+                "summary": result.summary,
             }

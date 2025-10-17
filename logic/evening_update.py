@@ -3,19 +3,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import List, Dict, Optional, Iterable
+import logging
+import time
+import uuid
+from typing import Iterable, List, Dict, Optional, Sequence, Set
 from collections import defaultdict
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, insert
+from sqlalchemy import select
 
 from db.models import (
     Subtask, SubtaskStatus,
     PlanItem, PlanItemSubtask, PlanBucket,
-    DailyLog, DailyLogItem
+    DailyLog, DailyLogItem, Ticket
+)
+
+from logic.llm_client import (
+    BlockedSummary,
+    EveningSummaryContext,
+    LLMClientError,
+    generate_evening_summary,
 )
 
 WEEKDAYS = {0,1,2,3,4}  # Mon..Fri
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class EveningPayload:
@@ -28,6 +40,7 @@ class EveningPayload:
 class EveningResult:
     plan_delta: List[Dict]       # newly created plan_items (id,date,bucket,notes,subtask_ids)
     notes: List[str]
+    summary: Optional[str] = None
 
 def _next_workday(d: date) -> date:
     x = d + timedelta(days=1)
@@ -67,6 +80,100 @@ def _append_to_plan_block(s: Session, d: date, note: str, subtask_ids: Iterable[
         if not exists:
             s.add(PlanItemSubtask(plan_item_id=pi.id, subtask_id=sid))
     return pi
+
+def _load_subtask_details(s: Session, ids: Sequence[str]) -> Dict[str, str]:
+    """Return {subtask_id: "Ticket: text"} for provided ids."""
+
+    normalized: List[uuid.UUID] = []
+    for raw in ids:
+        if not raw:
+            continue
+        try:
+            normalized.append(uuid.UUID(str(raw)))
+        except (TypeError, ValueError):
+            logger.debug("Skipping invalid subtask id when building summary context: %r", raw)
+    if not normalized:
+        return {}
+
+    rows = s.execute(
+        select(Subtask.id, Subtask.text_sub, Ticket.title)
+        .join(Ticket, Ticket.id == Subtask.ticket_id)
+        .where(Subtask.id.in_(normalized))
+    ).all()
+
+    details: Dict[str, str] = {}
+    for sid, text, title in rows:
+        ticket_title = (title or "").strip()
+        text_body = (text or "").strip()
+        label = text_body
+        if ticket_title:
+            label = f"{ticket_title}: {text_body}" if text_body else ticket_title
+        details[str(sid)] = label or str(sid)
+    return details
+
+
+def _build_evening_summary_context(
+    d: date,
+    payload: EveningPayload,
+    notes: Sequence[str],
+    carry_by_note: Dict[str, List[str]],
+    blocked_map: Dict[str, str],
+    subtask_details: Dict[str, str],
+) -> EveningSummaryContext:
+    def _label_list(ids: Optional[Sequence[str]]) -> List[str]:
+        out: List[str] = []
+        for sid in ids or []:
+            out.append(subtask_details.get(sid, str(sid)))
+        return out
+
+    blocked_entries: List[BlockedSummary] = []
+    for sid, note in blocked_map.items():
+        blocked_entries.append(
+            BlockedSummary(
+                item=subtask_details.get(sid, str(sid)),
+                note=(note or "").strip(),
+            )
+        )
+
+    carry_lines: List[str] = []
+    for note, ids in carry_by_note.items():
+        labels = _label_list(ids)
+        if labels:
+            carry_lines.append(f"{note}: {', '.join(labels)}")
+        else:
+            carry_lines.append(f"{note}: {len(ids)} subtask(s)")
+
+    return EveningSummaryContext(
+        date=d,
+        completed=_label_list(payload.completed),
+        in_progress=_label_list(payload.partial),
+        blocked=blocked_entries,
+        carry_over=carry_lines,
+        notes=list(notes),
+    )
+
+
+def _generate_summary_with_retry(
+    context: EveningSummaryContext,
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 0.5,
+) -> Optional[str]:
+    """Attempt to generate an evening summary via LLM with retry/backoff."""
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            summary = generate_evening_summary(context)
+            return summary.strip() if summary else summary
+        except LLMClientError as exc:
+            logger.warning("LLM summary attempt %s/%s failed: %s", attempt, max_attempts, exc)
+        except Exception as exc:  # pragma: no cover - safeguard
+            logger.exception("Unexpected error generating evening summary on attempt %s: %s", attempt, exc)
+        if attempt < max_attempts and base_delay > 0:
+            delay = base_delay * (2 ** (attempt - 1))
+            time.sleep(delay)
+    return None
+
 
 def process_evening_update(s: Session, payload: EveningPayload) -> EveningResult:
     d = payload.date
@@ -127,4 +234,26 @@ def process_evening_update(s: Session, payload: EveningPayload) -> EveningResult
         plan_delta = []
 
     s.commit()
-    return EveningResult(plan_delta=plan_delta, notes=notes)
+
+    summary: Optional[str] = None
+    try:
+        summary_ids: Set[str] = set(payload.completed or [])
+        summary_ids.update(payload.partial or [])
+        summary_ids.update(blocked_map.keys())
+        for ids in carry_by_note.values():
+            summary_ids.update(ids)
+
+        subtask_details = _load_subtask_details(s, list(summary_ids)) if summary_ids else {}
+        context = _build_evening_summary_context(
+            d=d,
+            payload=payload,
+            notes=notes,
+            carry_by_note=carry_by_note,
+            blocked_map=blocked_map,
+            subtask_details=subtask_details,
+        )
+        summary = _generate_summary_with_retry(context)
+    except Exception as exc:
+        logger.warning("Unable to generate evening summary: %s", exc, exc_info=True)
+
+    return EveningResult(plan_delta=plan_delta, notes=notes, summary=summary)
