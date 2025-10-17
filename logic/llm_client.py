@@ -191,6 +191,83 @@ def generate_subtask_bullets(ticket: Ticket, llm_options: Optional[Dict[str, Any
         raise
 
 
+def _format_affinity_members(members: Sequence[Any]) -> str:
+    lines: List[str] = []
+    for idx, member in enumerate(members, start=1):
+        text = getattr(member, "text_sub", "") or ""
+        tags = getattr(member, "tags", None)
+        ticket_id = getattr(member, "ticket_id", "") or ""
+        normalized_tags = ", ".join(str(tag).strip() for tag in (tags or []) if str(tag).strip())
+        desc_parts = [f"{idx}."]
+        if ticket_id:
+            desc_parts.append(f"ticket {ticket_id}")
+        if getattr(member, "id", None):
+            desc_parts.append(f"subtask {getattr(member, 'id')}")
+        if text:
+            desc_parts.append(f"\"{str(text).strip()}\"")
+        if normalized_tags:
+            desc_parts.append(f"tags: {normalized_tags}")
+        lines.append(" ".join(desc_parts))
+    if not lines:
+        raise LLMClientError("Affinity narrative requires at least one subtask description.")
+    return "\n".join(lines)
+
+
+def generate_affinity_group_narrative(
+    members: Iterable[Any],
+    llm_options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Produce a natural-language rationale for a set of related subtasks."""
+
+    member_list = list(members)
+    formatted_members = _format_affinity_members(member_list)
+
+    options = dict(llm_options or {})
+    model = options.get("model", DEFAULT_MODEL)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are helping project managers explain why subtasks can be batched together. "
+                "Respond with one or two concise sentences summarizing the shared objective."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Here are the subtasks that will be batched:\n"
+                f"{formatted_members}\n"
+                "Explain the common theme or dependency they share."
+            ),
+        },
+    ]
+
+    try:
+        client = _get_openai_client(options.get("api_key"))
+        response = client.responses.create(
+            model=model,
+            input=[{"role": m["role"], "content": m["content"]} for m in messages],
+            temperature=float(options.get("temperature", 0.2)),
+        )
+    except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+        raise LLMClientError(f"OpenAI API error: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - safeguard
+        raise LLMClientError(f"Unexpected error while calling OpenAI API: {exc}") from exc
+
+    raw_text = getattr(response, "output_text", None)
+    if not raw_text:
+        try:
+            raw_text = response.outputs[0].content[0].text  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - safety net for API changes
+            raise LLMClientError(f"OpenAI response did not include text output: {exc}") from exc
+
+    narrative = str(raw_text).strip()
+    if not narrative:
+        raise LLMClientError("LLM affinity narrative was empty.")
+
+    return narrative
+
+
 def reset_cached_client() -> None:
     """Clear the cached OpenAI client. Intended for use in tests."""
 
