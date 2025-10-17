@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date
-from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Dict, Iterable, List, Optional
+from functools import lru_cache
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from openai import OpenAI
 from openai import APIStatusError, APIConnectionError, RateLimitError
@@ -33,6 +32,9 @@ SUBTASK_GENERATION_DEFAULTS: Dict[str, Any] = {
 }
 
 
+_FOCUS_NOTE_CACHE: Dict[Tuple[str, Tuple[Tuple[str, str, str, str], ...], str], str] = {}
+
+
 @lru_cache(maxsize=1)
 def _get_openai_client(api_key: Optional[str] = None) -> OpenAI:
     """Return a cached OpenAI client instance.
@@ -49,6 +51,63 @@ def _get_openai_client(api_key: Optional[str] = None) -> OpenAI:
             "OPENAI_API_KEY environment variable is not configured."
         )
     return OpenAI(api_key=key)
+
+
+def _invoke_raw(messages: Sequence[Dict[str, str]], options: Dict[str, Any]) -> str:
+    """Invoke the OpenAI Responses API and normalize the returned text."""
+
+    request_options = dict(options)
+    api_key = request_options.get("api_key")
+    model = request_options.get("model", DEFAULT_MODEL)
+    temperature = float(request_options.get("temperature", 0.3))
+    max_output_tokens = request_options.get("max_output_tokens")
+    request_kwargs: Dict[str, Any] = {}
+    if max_output_tokens is not None:
+        request_kwargs["max_output_tokens"] = int(max_output_tokens)
+    for key in ("top_p", "frequency_penalty", "presence_penalty", "response_format"):
+        if key in request_options:
+            request_kwargs[key] = request_options[key]
+
+    try:
+        client = _get_openai_client(api_key)
+        response = client.responses.create(
+            model=model,
+            input=[{"role": msg["role"], "content": msg["content"]} for msg in messages],
+            temperature=temperature,
+            **request_kwargs,
+        )
+    except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+        raise LLMClientError(f"OpenAI API error: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - defensive guardrail
+        raise LLMClientError(f"Unexpected error while calling OpenAI API: {exc}") from exc
+
+    text = getattr(response, "output_text", None)
+    if not text:
+        try:
+            text = response.outputs[0].content[0].text  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - handle SDK drift
+            raise LLMClientError(f"OpenAI response missing text output: {exc}") from exc
+
+    normalized = str(text).strip()
+    if not normalized:
+        raise LLMClientError("OpenAI API returned an empty response.")
+
+    return normalized
+
+
+def _invoke_with_fallback(messages: Sequence[Dict[str, str]], options: Dict[str, Any]) -> str:
+    """Call the LLM, retrying with a fallback model if provided."""
+
+    try:
+        return _invoke_raw(messages, options)
+    except LLMClientError:
+        fallback_model = options.get("fallback_model")
+        if not fallback_model or fallback_model == options.get("model"):
+            raise
+        fallback_options = dict(options)
+        fallback_options["model"] = fallback_model
+        fallback_options.pop("fallback_model", None)
+        return _invoke_raw(messages, fallback_options)
 
 
 def _build_prompt(ticket: Ticket, llm_options: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -360,3 +419,84 @@ def generate_evening_summary(
             raise LLMClientError(f"OpenAI response did not include text output: {exc}") from exc
 
     return raw_text.strip()
+
+
+def _focus_note_cache_key(
+    block_date: date, items: Sequence[Dict[str, Any]], fallback_note: str
+) -> Tuple[str, Tuple[Tuple[str, str, str, str], ...], str]:
+    normalized_items: Tuple[Tuple[str, str, str, str], ...] = tuple(
+        (
+            str(item.get("subtask_id", "")).strip(),
+            str(item.get("ticket_id", "")).strip(),
+            str(item.get("detail", "")).strip(),
+            str(item.get("due_date") or item.get("due", "")).strip(),
+        )
+        for item in items
+    )
+    return (block_date.isoformat(), normalized_items, str(fallback_note))
+
+
+def reset_focus_note_cache() -> None:
+    """Clear memoized focus block summaries (used in tests)."""
+
+    _FOCUS_NOTE_CACHE.clear()
+
+
+def _build_focus_summary_prompt(
+    block_date: date, items: Sequence[Dict[str, Any]]
+) -> List[Dict[str, str]]:
+    system_lines = [
+        "You help delivery leads craft concise notes for focus-time calendar blocks.",
+        "Use one short sentence (max 35 words) describing the shared outcome of the work.",
+        "Mention ticket IDs when helpful and highlight due dates that are soon.",
+    ]
+
+    user_lines = [f"Date: {block_date.isoformat()}", "Subtasks:"]
+    for item in items:
+        ticket_id = str(item.get("ticket_id", "")).strip()
+        detail = str(item.get("detail", "")).strip()
+        due = str(item.get("due_date") or item.get("due", "")).strip()
+        bullet_parts = []
+        if ticket_id:
+            bullet_parts.append(ticket_id)
+        if detail:
+            bullet_parts.append(detail)
+        if due:
+            bullet_parts.append(f"due {due}")
+        user_lines.append(f"- {' — '.join(bullet_parts) if bullet_parts else '(details missing)'}")
+
+    return [
+        {"role": "system", "content": "\n".join(system_lines)},
+        {"role": "user", "content": "\n".join(user_lines)},
+    ]
+
+
+def summarize_focus_block(
+    block_date: date,
+    items: Sequence[Dict[str, Any]],
+    fallback_note: str,
+    llm_options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Summarize a focus block for plan builder notes with caching and fallback."""
+
+    normalized_items = [dict(item) for item in items if item]
+    if not normalized_items:
+        return fallback_note
+
+    cache_key = _focus_note_cache_key(block_date, normalized_items, fallback_note)
+    if cache_key in _FOCUS_NOTE_CACHE:
+        return _FOCUS_NOTE_CACHE[cache_key]
+
+    options = dict(llm_options or {})
+    messages = _build_focus_summary_prompt(block_date, normalized_items)
+
+    try:
+        note = _invoke_with_fallback(messages, options)
+    except LLMClientError:
+        note = fallback_note
+
+    if not note:
+        note = fallback_note
+
+    _FOCUS_NOTE_CACHE[cache_key] = note
+    return note
