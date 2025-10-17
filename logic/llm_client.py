@@ -23,6 +23,13 @@ class LLMClientError(RuntimeError):
 DEFAULT_MODEL = "gpt-4o-mini"
 
 
+SUBTASK_GENERATION_DEFAULTS: Dict[str, Any] = {
+    "max_subtasks": 5,
+    "first_subtask_estimate_hours": 1.0,
+    "default_estimate_hours": 1.5,
+}
+
+
 @lru_cache(maxsize=1)
 def _get_openai_client(api_key: Optional[str] = None) -> OpenAI:
     """Return a cached OpenAI client instance.
@@ -45,14 +52,24 @@ def _build_prompt(ticket: Ticket, llm_options: Dict[str, Any]) -> List[Dict[str,
     tags: Iterable[str] = ticket.tech or []
     tone = llm_options.get("tone")
     extra_context = llm_options.get("extra_context")
-    max_items = llm_options.get("max_subtasks") or 5
+    max_items = llm_options.get("max_subtasks", SUBTASK_GENERATION_DEFAULTS["max_subtasks"])
     requested_model = llm_options.get("model")
+    default_hours = llm_options.get(
+        "default_estimate_hours", SUBTASK_GENERATION_DEFAULTS["default_estimate_hours"]
+    )
+    first_hours = llm_options.get(
+        "first_subtask_estimate_hours",
+        SUBTASK_GENERATION_DEFAULTS["first_subtask_estimate_hours"],
+    )
+    dependencies = getattr(ticket, "dependencies", None) or []
+    acceptance = getattr(ticket, "acceptance_criteria", None)
 
     system_lines = [
         "You are an experienced software delivery lead helping to break down work.",
         "Produce well-scoped, actionable bullet items for engineers.",
         "Respond with a JSON array where each element has keys 'text_sub', 'tags', and 'est_hours'.",
         "Do not include markdown or commentary outside of JSON.",
+        "Incorporate relevant dependencies, sequencing risks, and acceptance criteria into the plan.",
     ]
     if tone:
         system_lines.append(f"Write the text_sub field with a {tone} tone.")
@@ -63,9 +80,26 @@ def _build_prompt(ticket: Ticket, llm_options: Dict[str, Any]) -> List[Dict[str,
         f"Tags: {', '.join(tags) if tags else 'none'}",
         f"Create at most {max_items} subtasks.",
         "Each subtask should estimate hours as a number (may be fractional).",
+        (
+            "Use roughly {:.1f} hours for the kickoff/discovery subtask and {:.1f} hours as the"
+            " baseline for the remaining items unless the ticket details justify otherwise."
+        ).format(first_hours, default_hours),
     ]
     if extra_context:
         user_lines.append(f"Additional context: {extra_context}")
+    if dependencies:
+        dep_text = ", ".join(str(dep).strip() for dep in dependencies if str(dep).strip())
+        user_lines.append(f"Dependencies or prerequisites: {dep_text or 'none provided'}")
+    else:
+        user_lines.append("Dependencies or prerequisites: none provided")
+
+    if acceptance:
+        if isinstance(acceptance, (list, tuple)):
+            crit_lines = ["Acceptance criteria:"]
+            crit_lines.extend(f"- {str(item).strip()}" for item in acceptance if str(item).strip())
+            user_lines.append("\n".join(crit_lines))
+        else:
+            user_lines.append(f"Acceptance criteria: {str(acceptance).strip()}")
 
     messages = [
         {"role": "system", "content": "\n".join(system_lines)},
@@ -141,7 +175,7 @@ def generate_subtask_bullets(ticket: Ticket, llm_options: Optional[Dict[str, Any
         Optional overrides such as tone, extra_context, model, or max_subtasks.
     """
 
-    options = dict(llm_options or {})
+    options = {**SUBTASK_GENERATION_DEFAULTS, **(llm_options or {})}
     messages = _build_prompt(ticket, options)
     raw_text = _invoke_with_fallback(messages, options)
 
