@@ -4,9 +4,12 @@ from __future__ import annotations
 from typing import Iterable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+import pytest
+
+sqlalchemy = pytest.importorskip("sqlalchemy")
+from sqlalchemy import select, update  # type: ignore[attr-defined]
+from sqlalchemy.exc import IntegrityError  # type: ignore[attr-defined]
+from sqlalchemy.orm import Session  # type: ignore[attr-defined]
 
 from db.models import (
     make_engine,

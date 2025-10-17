@@ -6,13 +6,18 @@ from sqlalchemy.orm import Session
 from api.deps import SessionLocal
 from db.models import Ticket, Subtask, SubtaskStatus
 from logic.decomposer import generate_bullets
+from logic.llm_client import LLMClientError
 
 ns = Namespace("subtasks", description="Create/list subtasks")
 
 create_in = ns.model("CreateIn", {
     "ticket_id": fields.String(required=True),
     "bullets": fields.List(fields.Raw, required=False, description="Optional explicit bullets [{text_sub,tags,est_hours}]"),
-    "mode": fields.String(required=False, default="append", description="append|replace")
+    "mode": fields.String(required=False, default="append", description="append|replace"),
+    "llm_options": fields.Raw(
+        required=False,
+        description="Optional LLM overrides such as tone, extra_context, model, or temperature. Requires OPENAI_API_KEY."
+    ),
 })
 
 subtask_out = ns.model("SubtaskOut", {
@@ -31,10 +36,13 @@ class CreateForTicket(Resource):
     @ns.expect(create_in)
     @ns.marshal_list_with(subtask_out)
     def post(self):
+        """Create subtasks for a ticket. Requires OPENAI_API_KEY for LLM generation."""
+
         body = request.get_json(force=True)
         tid = body["ticket_id"]
         bullets = body.get("bullets")
         mode = (body.get("mode") or "append").lower()
+        llm_options = body.get("llm_options") or {}
 
         with SessionLocal() as s:  # type: Session
             t = s.get(Ticket, tid)
@@ -53,7 +61,12 @@ class CreateForTicket(Resource):
 
             # generate bullets if not provided
             if not bullets:
-                bullets = generate_bullets(t)
+                try:
+                    bullets = generate_bullets(t, llm_options=llm_options)
+                except LLMClientError as exc:
+                    ns.abort(502, message=str(exc))
+                except Exception as exc:  # pragma: no cover - guardrail
+                    ns.abort(500, message=f"Unexpected error generating subtasks: {exc}")
 
             created = []
             for i, b in enumerate(bullets, start=next_seq):
