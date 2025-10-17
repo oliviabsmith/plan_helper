@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Iterable, List, Dict, Set, Optional, Tuple
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_, delete
@@ -137,8 +137,10 @@ def build_plan(
     buffer_blocks = max(1, int(round(raw_blocks * constraints.buffer_ratio)))
     focus_blocks_per_day = max(1, raw_blocks - buffer_blocks)
 
+    # Queue of affinity batches to consider across days
+    pending_batches: deque[Tuple[str, List[Subtask]]] = deque(affinity_batches)
+
     # Fill days
-    batch_idx = 0
     singleton_idx = 0
 
     for d in workdays:
@@ -147,12 +149,13 @@ def build_plan(
 
         # 1) Allocate affinity batches in morning Focus blocks, respecting contexts/day
         fb = 0
-        while fb < focus_blocks_per_day and batch_idx < len(affinity_batches):
-            key, sts = affinity_batches[batch_idx]
-            batch_idx += 1
+        day_deferred: deque[Tuple[str, List[Subtask]]] = deque()
+        while fb < focus_blocks_per_day and pending_batches:
+            key, sts = pending_batches[0]
             # Context control
             ctx_part = key.split(":")[0] if ":" in key else key
             if len(day_contexts) < constraints.max_contexts_per_day or ctx_part in day_contexts:
+                pending_batches.popleft()
                 day_contexts.add(ctx_part)
                 ids = [str(st.id) for st in sts if str(st.id) not in used_subtasks]
                 if ids:
@@ -176,9 +179,10 @@ def build_plan(
                     blocks_today.append(PlannedBlock(date=d, bucket=PlanBucket.Focus, note=note_text, subtask_ids=ids))
                     used_subtasks.update(ids)
                     fb += 1
-            # else: skip this batch for today (it will be reconsidered tomorrow)
-        # Rewind skipped batches logic: simple MVP — skipped batches are effectively lost today;
-        # they will be placed as singletons pass if members remain unplanned.
+            else:
+                day_deferred.append(pending_batches.popleft())
+        # Requeue deferred batches so they are reconsidered on the next workday
+        pending_batches.extend(day_deferred)
 
         # 2) Fill remaining Focus slots with singletons, respecting contexts/day
         while fb < focus_blocks_per_day and singleton_idx < len(singleton_subtasks):
